@@ -1,0 +1,75 @@
+"""
+testar_openmes.py
+Valida a API do OpenMES fora do gateway: saúde, autenticação, linhas, work orders,
+tipos de problema e (opcional) criação de um issue de teste.
+Usa as configurações OPENMES_* do config.py.
+"""
+import requests
+
+import openmes_cliente as openmes
+from config import (OPENMES_ISSUE_TYPE_ID, OPENMES_URL, OPENMES_WORK_ORDER_ID, TIMEOUT_HTTP_S)
+
+CRIAR_ISSUE = False      # True para enviar um issue de teste ao OpenMES
+
+
+def detalhes(titulo, resp):
+    print(f"\n== {titulo}: HTTP {resp.status_code}")
+    print("   URL final:", resp.url)
+    print("   Redirecionamentos:", [(h.status_code, h.headers.get("Location")) for h in resp.history])
+    print("   Content-Type:", resp.headers.get("Content-Type"))
+    print("   Corpo (início):", resp.text[:200].replace("\n", " "))
+
+
+def lista(resp):
+    """A API devolve {"data": [...]} nas listagens."""
+    corpo = openmes.resposta_json(resp)
+    dados = corpo.get("data", corpo) if isinstance(corpo, dict) else corpo
+    return dados if isinstance(dados, list) else []
+
+
+def main():
+    # 1) Saúde (sem autenticação): mostra o que realmente responde na URL
+    r = requests.get(f"{OPENMES_URL}/api/health", headers={"Accept": "application/json"},
+                     timeout=TIMEOUT_HTTP_S)
+    detalhes("health", r)
+    try:
+        print("   ->", openmes.verificar_api())
+    except openmes.ErroOpenMES as erro:
+        print("   FALHA:", erro)
+        print("\nA URL não aponta para a API do OpenMES. Confira o IP, a porta e se há redirecionamento.")
+        return
+
+    # 2) Token (fixo ou por login)
+    try:
+        token = openmes.obter_token()
+    except (openmes.ErroOpenMES, requests.RequestException) as erro:
+        print("\nFALHA na autenticação:", erro)
+        return
+    print("\ntoken obtido:", token[:6] + "...")
+    cab = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+    # 3) Listagens
+    for titulo, caminho, campos in (
+        ("linhas", "/api/v1/lines", ("id", "code", "name")),
+        ("work orders", "/api/v1/work-orders?per_page=20", ("id", "order_no", "status")),
+        ("tipos de problema", "/api/v1/issue-types", ("id", "name", "is_critical")),
+    ):
+        r = requests.get(f"{OPENMES_URL}{caminho}", headers=cab, timeout=TIMEOUT_HTTP_S)
+        print(f"\n== {titulo}: HTTP {r.status_code}")
+        if r.status_code != 200:
+            print("  ", r.text[:300])
+            continue
+        for item in lista(r):
+            print("  ", " | ".join(str(item.get(c)) for c in campos))
+
+    # 4) Issue de teste (opcional)
+    if CRIAR_ISSUE:
+        try:
+            dados = openmes.criar_issue("Teste de integração CODESYS -> OpenMES (reservatório)")
+            print("\nIssue criado:", dados)
+        except (openmes.ErroOpenMES, requests.RequestException) as erro:
+            print("\nFALHA ao criar o issue:", erro)
+        print(f"(work_order_id={OPENMES_WORK_ORDER_ID}, issue_type_id={OPENMES_ISSUE_TYPE_ID})")
+
+
+main()
