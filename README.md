@@ -19,6 +19,7 @@ dados no supervisório e alarmes no sistema de manufatura.
 [Início rápido](#-início-rápido) •
 [Configuração](#-configuração) •
 [Scripts](#-scripts) •
+[Banco de alarmes](#-banco-de-dados-dos-alarmes-do-e3) •
 [Problemas comuns](#-problemas-comuns) •
 [Segurança](#-segurança) •
 [Notion](#-notion)
@@ -68,6 +69,7 @@ flowchart LR
 - 📡 Envia as quatro variáveis ao **E3** a cada ciclo, no formato do driver SequenceWebService.
 - 🚨 Registra **alarmes de nível baixo e alto** no OpenMES, com histerese e **fila de reenvio**.
 - 📝 Grava um **resumo dos valores** no campo `description` da ordem, a cada 30 s.
+- 🗄️ Guarda o **histórico de alarmes do E3** num banco **MySQL** que sobe com Docker Compose (pasta [`banco/`](banco)).
 - 🧪 Traz scripts de **diagnóstico e teste** para cada etapa, sem precisar do gateway completo.
 
 ---
@@ -82,6 +84,7 @@ flowchart LR
 | Elipse E3 | Studio com o driver **SequenceWebService v1.0.4** instalado |
 | OpenMES | Instância acessível por HTTP (neste projeto, `http://localhost:8090`) |
 | Python | 3.x, com `asyncua` e `requests` |
+| Docker | Opcional, só para o banco de alarmes do E3 (Docker Desktop ou Docker Engine) |
 
 ### Instalação
 
@@ -92,7 +95,8 @@ cd API_grupoB
 python -m venv .venv
 .venv\Scripts\activate
 
-pip install asyncua requests
+pip install -r requirements.txt
+cd api_reservatorio
 copy config.example.py config.py      # depois, edite o config.py
 ```
 
@@ -111,6 +115,7 @@ copy config.example.py config.py      # depois, edite o config.py
 | 7 | **E3**: configurar o driver e as quatro tags, e testar o envio | `python testar_e3.py` |
 | 8 | **OpenMES**: validar a API, criar a ordem e descobrir o campo de texto | `python testar_openmes.py` e `python testar_campo_ordem.py` |
 | 9 | Rodar o gateway | `python gateway_codesys_e3.py` |
+| 10 | *(Opcional)* Subir o MySQL do Servidor de Alarmes do E3 | `cd banco` e `docker compose up -d` ([detalhes](#-banco-de-dados-dos-alarmes-do-e3)) |
 
 ### Exemplo de saída do gateway
 
@@ -153,6 +158,7 @@ Todas as opções ficam no `config.py` (copiado do `config.example.py`).
 | 4840 | Servidor OPC UA do CODESYS | |
 | 5051 | Driver SequenceWebService do E3 | A padrão do driver, 8080, é ocupada pelo ScadaBR no laboratório |
 | 8090 | OpenMES | |
+| 3307 | MySQL dos alarmes do E3 (Docker) | Evita conflito com outro MySQL na 3306; configurável no `.env` |
 
 ### 🚨 Regras dos alarmes
 
@@ -166,28 +172,74 @@ em fila e são reenviadas no ciclo seguinte; o envio ao E3 continua normalmente.
 
 ---
 
+## 🗄️ Banco de dados dos alarmes do E3
+
+O **Servidor de Alarmes** do E3 pode gravar o histórico num banco de dados. Para isso, o repositório traz um
+**MySQL 8** pronto em Docker, na pasta [`banco/`](banco). Só o `docker-compose.yml` e o modelo `.env.example`
+são versionados; os **dados** ficam num volume local do Docker e **não vão ao GitHub**.
+
+### Subir o banco
+
+```powershell
+cd banco
+copy .env.example .env      # edite o .env e troque as duas senhas
+docker compose up -d
+docker compose ps           # deve aparecer "healthy"
+```
+
+### Configurar no E3 Studio
+
+| Passo | Configuração |
+| :-: | --- |
+| 1 | Inserir um objeto **Database** com `SourceType = 4 - stMySQL` |
+| 2 | **Server** `localhost` · **Port** `3307` · **Database** `alarmes_e3` · **User** `e3_alarmes` · **Password** a do `.env` |
+| 3 | Clicar em **Test Connection** (nunca use o usuário `root`) |
+| 4 | No **Alarm Server**, marcar **Store alarms on a database** e escolher o Database Server e o nome da tabela |
+| 5 | Clicar em **Create Table**: o próprio E3 cria as tabelas |
+
+Para conferir se os alarmes foram gravados:
+
+```powershell
+docker exec -it e3-alarmes-mysql mysql -ue3_alarmes -p alarmes_e3 -e "SHOW TABLES;"
+```
+
+> ⚠️ O MySQL 8.0.11 ou superior é exigido pelo E3. Segundo a base de conhecimento da Elipse, a conexão pode precisar
+> do *Visual C++ 2019 Redistributable (x86)*. Para levar os dados a outro computador, gere um `mysqldump` e envie
+> por fora do repositório.
+
+---
+
 ## 📂 Estrutura do repositório
 
 ```text
 API_grupoB/
 ├── 📄 README.md
-├── 📄 codigos_codesys.txt        # código ST e estrutura do projeto CODESYS
-├── 📄 config.example.py          # modelo do config.py (sem credenciais)
-├── 🐍 gateway_codesys_e3.py      # gateway: lê o CODESYS e envia ao E3 e ao OpenMES
-├── 🐍 openmes_cliente.py         # cliente da API REST do OpenMES
-├── 🐍 mqtt_publicador.py         # publicação MQTT (opcional, desligada)
-├── 🔐 gerar_certificado.py       # certificado do cliente OPC UA
-├── 🔎 descobrir.py               # servidores e endpoints do OPC UA
-├── 🔎 listar_nos.py              # NodeIds das variáveis
-├── 🧪 teste_leitura.py           # leitura do CLP, sem enviar nada
-├── 🧪 testar_e3.py               # envio de valores fixos ao driver do E3
-├── 🧪 diagnostico_e3.py          # testa formatos de valor no E3
-├── 🧪 testar_openmes.py          # saúde, token e listagens do OpenMES
-├── 🧪 testar_campo_ordem.py      # descobre o campo de texto da ordem
-└── 🧰 criar_produto.py           # cadastra um produto (módulo ERP do OpenMES)
+├── 📄 .gitignore                 # bloqueia config.py, chaves, .env e arquivos locais do CODESYS
+├── 📄 requirements.txt           # dependências do Python
+├── 📄 .env.example               # modelo de variáveis de ambiente (sem senhas)
+├── 🏭 codesys/                   # projeto CODESYS do reservatório
+├── 🗂️ Tanque/                    # (descrever o conteúdo)
+├── 🗄️ banco_dados/                     # MySQL dos alarmes do E3
+│   ├── docker-compose.yml
+│   ├── .env.example              # modelo; o .env real não é versionado
+│   └── .gitignore
+└── 🐍 api_reservatorio/          # gateway e scripts de teste
+    ├── gateway_codesys_e3.py     # gateway: lê o CODESYS e envia ao E3 e ao OpenMES
+    ├── config.example.py         # modelo do config.py (sem credenciais)
+    ├── openmes_cliente.py        # cliente da API REST do OpenMES
+    ├── mqtt_publicador.py        # publicação MQTT (opcional, desligada)
+    ├── gerar_certificado.py      # certificado do cliente OPC UA
+    ├── descobrir.py              # servidores e endpoints do OPC UA
+    ├── listar_nos.py             # NodeIds das variáveis
+    ├── teste_leitura.py          # leitura do CLP, sem enviar nada
+    ├── testar_e3.py              # envio de valores fixos ao driver do E3
+    ├── diagnostico_e3.py         # testa formatos de valor no E3
+    ├── testar_openmes.py         # saúde, token e listagens do OpenMES
+    ├── testar_campo_ordem.py     # descobre o campo de texto da ordem
+    └── criar_produto.py          # cadastra um produto (módulo ERP do OpenMES)
 ```
 
-> Ajuste os nomes e as pastas se a organização do repositório for diferente.
+> Os scripts da seção seguinte ficam em `api_reservatorio/`; rode os comandos a partir dessa pasta.
 
 ---
 
@@ -242,6 +294,16 @@ O `Err` 0 só confirma que o driver recebeu a requisição. Confira:
 </details>
 
 <details>
+<summary><b>MySQL dos alarmes: o E3 não conecta ou o contêiner não sobe</b></summary>
+
+- `docker compose up` reclama de variável: o `.env` não existe ou está sem `MYSQL_ROOT_PASSWORD` e `MYSQL_PASSWORD`.
+- **Test Connection** falha: confira `Server` `localhost`, `Port` `3307` e o usuário `e3_alarmes` (não o `root`). Se persistir, instale o *Visual C++ 2019 Redistributable (x86)*.
+- Erro de plugin de autenticação: descomente a linha `mysql_native_password` no `docker-compose.yml` e rode `docker compose up -d --force-recreate`. Se o erro continuar, `docker compose down -v` recria o banco do zero (**apaga os dados**).
+- `docker` não funciona no computador do laboratório: o Docker pode exigir permissão de administrador; nesse caso, instale o MySQL 8 direto no Windows.
+
+</details>
+
+<details>
 <summary><b>OpenMES: <code>422</code>, conexão recusada ou resposta sem JSON</b></summary>
 
 - `422` ao criar a ordem: esta versão pede `planned_qty`, e não `quantity`.
@@ -260,15 +322,32 @@ O `Err` 0 só confirma que o driver recebeu a requisição. Confira:
 Arquivo `.gitignore` sugerido:
 
 ```gitignore
+# Credenciais e certificados
 config.py
+.env
 cliente_key.pem
 cliente_cert.der
+
+# Python
 __pycache__/
 .venv/
+
+# CODESYS (arquivos locais ou gerados; versionar só o .project)
+*.~u
+*.precompilecache
+*.opt
+*.bak
+*.compileinfo
+
+# Dumps do banco
+*.sql
+*.sql.gz
+*.dump
 ```
 
-Se o `config.py` já tiver sido enviado em algum commit, troque as senhas e o token que estavam nele: remover o
-arquivo depois não apaga o histórico do repositório.
+Se o `config.py`, o `.env` ou a `cliente_key.pem` já tiverem sido enviados em algum commit, **troque** as senhas, o
+token e o certificado: remover o arquivo depois não apaga o histórico do repositório. No caso da chave do certificado,
+gere um novo par com `gerar_certificado.py`, aprove o novo certificado no CODESYS e remova o antigo dos *Trusted Certificates*.
 
 ---
 
@@ -283,6 +362,7 @@ arquivo depois não apaga o histórico do repositório.
 - O OpenMES mostra só o **último valor**, sem histórico nem gráfico. Para telemetria contínua seria preciso o **MQTT** com um broker (o código existe, mas está desligado).
 - A comunicação entre o gateway e o E3 usa **HTTP simples**, sem criptografia, em ciclos de 2 s: serve ao trabalho acadêmico, não a um controle em tempo real.
 - Sem licença, o runtime **Control Win** roda em modo de demonstração por cerca de duas horas e depois exige reinício manual.
+- O banco dos alarmes do E3 depende de **Docker** (ou de um MySQL 8 instalado) no computador do E3, e a conexão do E3 com o MySQL ainda precisa ser validada no laboratório.
 - A instância do OpenMES do grupo é **mais antiga** que a documentação publicada; nomes de campos podem divergir.
 
 ## 👥 Equipe
